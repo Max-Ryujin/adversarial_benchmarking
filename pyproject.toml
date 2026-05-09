@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adversarial-benchmarking"
+version = "0.1.0"
+description = "Proof-of-concept adversarial benchmarking for vision-language models"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26.0",
+    "pillow>=10.0.0",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "transformers @ git+https://github.com/huggingface/transformers",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+autoattack = [
+    "autoattack @ git+https://github.com/fra31/auto-attack",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
