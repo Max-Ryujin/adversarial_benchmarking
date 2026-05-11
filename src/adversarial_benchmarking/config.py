@@ -20,8 +20,9 @@ class RunConfig:
     true_label: str
     prompt: str
     choices: list[str]
+    debug: bool = False
     model_name: str = "Qwen/Qwen3-VL-4B-Instruct"
-    device: str = "cuda"
+    device: str = "auto"
     min_pixels: int | None = None
     max_pixels: int | None = None
     resize: int | None = 448

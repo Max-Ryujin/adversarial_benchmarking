@@ -38,6 +38,18 @@ python scripts/run_poc.py \
   --output-dir outputs/demo
 ```
 
+Enable verbose tracing for the full pipeline:
+
+```bash
+python scripts/run_poc.py \
+  --image path/to/image.jpg \
+  --true-label cat \
+  --prompt "What animal is in the image?" \
+  --choices cat dog horse bird \
+  --output-dir outputs/demo \
+  --debug
+```
+
 Targeted attack example:
 
 ```bash
@@ -55,6 +67,7 @@ Artifacts are written to the output directory:
 - `clean.png`
 - `adversarial.png`
 - `summary.json`
+- `run.log` (`INFO` by default, full step-by-step traces with `--debug`)
 
 ## Extension points
 

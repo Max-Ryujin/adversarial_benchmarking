@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -9,9 +10,13 @@ from transformers import AutoProcessor
 from adversarial_benchmarking.attacks.pgd import pgd_attack
 from adversarial_benchmarking.config import AttackConfig, RunConfig
 from adversarial_benchmarking.data.image_folder import load_image_tensor
+from adversarial_benchmarking.logging_utils import configure_logging, format_named_logits, get_logger
 from adversarial_benchmarking.models.qwen3_vl import Qwen3VLFirstTokenClassifier
 from adversarial_benchmarking.tasks.multiple_choice import MultipleChoiceTask
 from adversarial_benchmarking.utils import save_image_tensor, write_json
+
+
+logger = get_logger("scripts.run_poc")
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-label", help="Optional target label for targeted PGD.")
     parser.add_argument("--output-dir", default="outputs/poc", help="Directory for artifacts.")
     parser.add_argument("--model-name", default="Qwen/Qwen3-VL-4B-Instruct", help="HF model name.")
-    parser.add_argument("--device", default="cuda", help="Torch device.")
+    parser.add_argument("--device", default="auto", help="Torch device. Use 'auto' to pick a supported accelerator or CPU.")
     parser.add_argument("--resize", type=int, default=448, help="Fixed square resize before processor.")
     parser.add_argument("--min-pixels", type=int)
     parser.add_argument("--max-pixels", type=int)
@@ -31,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-size", type=float, default=2.0 / 255.0)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--no-random-start", action="store_true")
+    parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging and write it to the output dir.")
     return parser.parse_args()
 
 
@@ -49,6 +55,7 @@ def main() -> None:
         max_pixels=args.max_pixels,
         resize=args.resize,
         target_label=args.target_label,
+        debug=args.debug,
     )
     attack_config = AttackConfig(
         epsilon=args.epsilon,
@@ -59,6 +66,10 @@ def main() -> None:
     )
 
     run_config.output_dir.mkdir(parents=True, exist_ok=True)
+    configure_logging(debug=run_config.debug, log_file=run_config.output_dir / "run.log")
+    logger.info("Starting adversarial benchmarking run")
+    logger.debug("Run config: %s", asdict(run_config))
+    logger.debug("Attack config: %s", asdict(attack_config))
 
     processor = AutoProcessor.from_pretrained(run_config.model_name)
     task = MultipleChoiceTask.from_labels(
@@ -87,11 +98,21 @@ def main() -> None:
     clean_result = model.forward_result(clean_image)
     clean_prediction_index = clean_result.class_logits.argmax(dim=-1).item()
     clean_generation = model.generate_letters(clean_image)[0]
+    logger.info("Clean prediction: %s", task.class_labels()[clean_prediction_index])
+    logger.debug(
+        "Clean class logits: %s",
+        format_named_logits(task.class_labels(), clean_result.class_logits[0]),
+    )
 
     adv_image = pgd_attack(model, clean_image, labels, attack_config)
     adv_result = model.forward_result(adv_image)
     adv_prediction_index = adv_result.class_logits.argmax(dim=-1).item()
     adv_generation = model.generate_letters(adv_image)[0]
+    logger.info("Adversarial prediction: %s", task.class_labels()[adv_prediction_index])
+    logger.debug(
+        "Adversarial class logits: %s",
+        format_named_logits(task.class_labels(), adv_result.class_logits[0]),
+    )
 
     save_image_tensor(clean_image[0], run_config.output_dir / "clean.png")
     save_image_tensor(adv_image[0], run_config.output_dir / "adversarial.png")
@@ -117,6 +138,7 @@ def main() -> None:
         },
     }
     write_json(summary, run_config.output_dir / "summary.json")
+    logger.info("Artifacts written to %s", run_config.output_dir)
 
     print(summary)
 
