@@ -7,7 +7,7 @@ Current scope:
 - Qwen `Qwen/Qwen3-VL-4B-Instruct`
 - Letter-based multiple-choice classification prompts
 - PGD attacks on raw image pixels
-- A thin adapter for future AutoAttack integration
+- Optional AutoAttack evaluation on raw image pixels
 
 ## Setup
 
@@ -36,6 +36,15 @@ python scripts/run_poc.py \
   --prompt "What animal is in the image?" \
   --choices cat dog horse bird \
   --output-dir outputs/demo
+
+# AutoAttack (requires `pip install -e .[autoattack]`)
+python scripts/run_poc.py \
+  --image path/to/image.jpg \
+  --true-label cat \
+  --prompt "What animal is in the image?" \
+  --choices cat dog horse bird \
+  --attack autoattack \
+  --output-dir outputs/demo-autoattack
 ```
 
 Enable verbose tracing for the full pipeline:

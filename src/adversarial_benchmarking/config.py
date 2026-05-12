@@ -6,6 +6,8 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class AttackConfig:
+    name: str = "pgd"
+    norm: str = "Linf"
     epsilon: float = 8.0 / 255.0
     step_size: float = 2.0 / 255.0
     steps: int = 20

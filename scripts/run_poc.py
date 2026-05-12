@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from transformers import AutoProcessor
 
+from adversarial_benchmarking.attacks.autoattack import autoattack_attack
 from adversarial_benchmarking.attacks.pgd import pgd_attack
 from adversarial_benchmarking.config import AttackConfig, RunConfig
 from adversarial_benchmarking.data.image_folder import load_image_tensor
@@ -17,6 +18,19 @@ from adversarial_benchmarking.utils import save_image_tensor, write_json
 
 
 logger = get_logger("scripts.run_poc")
+
+
+def run_attack(
+    model: Qwen3VLFirstTokenClassifier,
+    clean_image: torch.Tensor,
+    labels: torch.Tensor,
+    attack_config: AttackConfig,
+) -> torch.Tensor:
+    if attack_config.name == "pgd":
+        return pgd_attack(model, clean_image, labels, attack_config)
+    if attack_config.name == "autoattack":
+        return autoattack_attack(model, clean_image, labels, attack_config)
+    raise ValueError(f"Unsupported attack: {attack_config.name}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resize", type=int, default=448, help="Fixed square resize before processor.")
     parser.add_argument("--min-pixels", type=int)
     parser.add_argument("--max-pixels", type=int)
+    parser.add_argument("--attack", choices=("pgd", "autoattack"), default="pgd", help="Attack implementation to run.")
+    parser.add_argument("--norm", default="Linf", help="Threat model norm for AutoAttack.")
     parser.add_argument("--epsilon", type=float, default=8.0 / 255.0)
     parser.add_argument("--step-size", type=float, default=2.0 / 255.0)
     parser.add_argument("--steps", type=int, default=20)
@@ -58,6 +74,8 @@ def main() -> None:
         debug=args.debug,
     )
     attack_config = AttackConfig(
+        name=args.attack,
+        norm=args.norm,
         epsilon=args.epsilon,
         step_size=args.step_size,
         steps=args.steps,
@@ -104,7 +122,7 @@ def main() -> None:
         format_named_logits(task.class_labels(), clean_result.class_logits[0]),
     )
 
-    adv_image = pgd_attack(model, clean_image, labels, attack_config)
+    adv_image = run_attack(model, clean_image, labels, attack_config)
     adv_result = model.forward_result(adv_image)
     adv_prediction_index = adv_result.class_logits.argmax(dim=-1).item()
     adv_generation = model.generate_letters(adv_image)[0]
@@ -130,6 +148,8 @@ def main() -> None:
         "clean_logits": clean_result.class_logits[0].detach().cpu().tolist(),
         "adv_logits": adv_result.class_logits[0].detach().cpu().tolist(),
         "attack": {
+            "name": attack_config.name,
+            "norm": attack_config.norm,
             "epsilon": attack_config.epsilon,
             "step_size": attack_config.step_size,
             "steps": attack_config.steps,

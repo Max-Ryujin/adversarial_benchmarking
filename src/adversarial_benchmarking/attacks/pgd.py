@@ -43,7 +43,7 @@ def pgd_attack(
 
         grad = torch.autograd.grad(loss, adv_images)[0]
         adv_images = adv_images.detach() + config.step_size * grad.sign()
-        delta = torch.clamp(adv_images - images, min=-config.epsilon, max=config.epsilon)
+        delta = torch.clamp(adv_images - images, min=-config.epsilon, max=config.epsilon) # ensure epsilon ball
         adv_images = torch.clamp(images + delta, 0.0, 1.0)
         predicted_indices = logits.argmax(dim=-1)
         logger.debug(
