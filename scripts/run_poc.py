@@ -8,6 +8,7 @@ import torch
 from transformers import AutoProcessor
 
 from adversarial_benchmarking.attacks.autoattack import autoattack_attack
+from adversarial_benchmarking.attacks.autoattack2 import apgd_attack
 from adversarial_benchmarking.attacks.pgd import pgd_attack
 from adversarial_benchmarking.config import AttackConfig, RunConfig
 from adversarial_benchmarking.data.image_folder import load_image_tensor
@@ -28,6 +29,16 @@ def run_attack(
 ) -> torch.Tensor:
     if attack_config.name == "pgd":
         return pgd_attack(model, clean_image, labels, attack_config)
+    if attack_config.name == "apgd":
+        return apgd_attack(
+            model=model,
+            images=clean_image,
+            labels=labels,
+            config=attack_config,
+            use_dlr=True,
+            momentum=0.75,
+            eot_iter=1,
+        )
     if attack_config.name == "autoattack":
         return autoattack_attack(model, clean_image, labels, attack_config)
     raise ValueError(f"Unsupported attack: {attack_config.name}")
@@ -38,7 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", required=True, help="Path to the input image.")
     parser.add_argument("--true-label", required=True, help="Semantic label for the clean image.")
     parser.add_argument("--prompt", required=True, help="Task instruction shown to the model.")
-    parser.add_argument("--choices", required=True, nargs="+", help="Semantic labels for A/B/C/... options.")
+    parser.add_argument(
+        "--choices",
+        required=True,
+        nargs="+",
+        help="Semantic labels for A/B/C/... options, e.g. 'cat dog mouse' rather than 'A B C'.",
+    )
     parser.add_argument("--target-label", help="Optional target label for targeted PGD.")
     parser.add_argument("--output-dir", default="outputs/poc", help="Directory for artifacts.")
     parser.add_argument("--model-name", default="Qwen/Qwen3-VL-4B-Instruct", help="HF model name.")
@@ -46,7 +62,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resize", type=int, default=448, help="Fixed square resize before processor.")
     parser.add_argument("--min-pixels", type=int)
     parser.add_argument("--max-pixels", type=int)
-    parser.add_argument("--attack", choices=("pgd", "autoattack"), default="pgd", help="Attack implementation to run.")
+    parser.add_argument(
+        "--attack",
+        choices=("pgd", "apgd", "autoattack"),
+        default="pgd",
+        help="Attack implementation to run. Use 'apgd' for the local adaptive PGD variant and 'autoattack' for the external AutoAttack package.",
+    )
     parser.add_argument("--norm", default="Linf", help="Threat model norm for AutoAttack.")
     parser.add_argument("--epsilon", type=float, default=8.0 / 255.0)
     parser.add_argument("--step-size", type=float, default=2.0 / 255.0)

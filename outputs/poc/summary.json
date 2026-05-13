@@ -1,0 +1,38 @@
+{
+  "prompt": "What animal is in the image?\nChoose exactly one option and answer with only the letter.\nA: cat\nB: dog\nC: mouse",
+  "choice_letters": [
+    "A",
+    "B",
+    "C"
+  ],
+  "choices": [
+    "cat",
+    "dog",
+    "mouse"
+  ],
+  "true_label": "cat",
+  "target_label": "dog",
+  "clean_prediction": "cat",
+  "adv_prediction": "dog",
+  "clean_generation": "A",
+  "adv_generation": "B",
+  "clean_logits": [
+    62.283729553222656,
+    33.69933319091797,
+    33.52973937988281
+  ],
+  "adv_logits": [
+    33.03810501098633,
+    49.67668533325195,
+    35.153594970703125
+  ],
+  "attack": {
+    "name": "apgd",
+    "norm": "Linf",
+    "epsilon": 0.1,
+    "step_size": 0.01,
+    "steps": 30,
+    "targeted": true,
+    "random_start": true
+  }
+}

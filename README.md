@@ -8,6 +8,7 @@ Current scope:
 - Letter-based multiple-choice classification prompts
 - PGD attacks on raw image pixels
 - Optional AutoAttack evaluation on raw image pixels
+- Local APGD variant for targeted first-token attacks
 
 ## Setup
 
@@ -37,7 +38,17 @@ python scripts/run_poc.py \
   --choices cat dog horse bird \
   --output-dir outputs/demo
 
-# AutoAttack (requires `pip install -e .[autoattack]`)
+# Local APGD variant
+python scripts/run_poc.py \
+  --image path/to/image.jpg \
+  --true-label cat \
+  --target-label dog \
+  --prompt "What animal is in the image?" \
+  --choices cat dog horse bird \
+  --attack apgd \
+  --output-dir outputs/demo-apgd
+
+# AutoAttack (requires `pip install -e .[autoattack]`; untargeted only)
 python scripts/run_poc.py \
   --image path/to/image.jpg \
   --true-label cat \
@@ -68,6 +79,7 @@ python scripts/run_poc.py \
   --target-label ai-generated \
   --prompt "Is this image real or AI-generated?" \
   --choices real ai-generated \
+  --attack apgd \
   --output-dir outputs/real-vs-ai
 ```
 

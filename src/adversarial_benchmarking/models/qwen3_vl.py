@@ -47,6 +47,16 @@ def _resolve_device(device: str) -> torch.device:
     return resolved
 
 
+def _resolve_torch_dtype(
+    torch_dtype: torch.dtype | str,
+    device: torch.device,
+) -> torch.dtype | str:
+    if device.type == "cpu" and torch_dtype == "auto":
+        logger.info("Using float32 weights on CPU to keep backward passes supported.")
+        return torch.float32
+    return torch_dtype
+
+
 class Qwen3VLFirstTokenClassifier(torch.nn.Module):
     def __init__(
         self,
@@ -65,13 +75,15 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         if max_pixels is not None:
             processor_kwargs["max_pixels"] = max_pixels
 
+        resolved_device = _resolve_device(device)
+        resolved_dtype = _resolve_torch_dtype(torch_dtype, resolved_device)
+
         self.processor = AutoProcessor.from_pretrained(model_name, **processor_kwargs)
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
+            torch_dtype=resolved_dtype,
             device_map=None,
         )
-        resolved_device = _resolve_device(device)
         self.model.to(resolved_device)
         self.model.eval()
 
