@@ -70,6 +70,15 @@ python scripts/run_poc.py \
   --debug
 ```
 
+Interactive image chat:
+
+```bash
+python scripts/chat_with_image.py path/to/image.jpg \
+  --prompt "Describe what you see in this image."
+```
+
+The script sends the image with the first user turn, prints the assistant reply, and then keeps reading follow-up prompts from stdin until you enter `exit`, `quit`, `/exit`, or `/quit`.
+
 Targeted attack example:
 
 ```bash
