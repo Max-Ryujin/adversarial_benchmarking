@@ -21,8 +21,8 @@ class MultipleChoiceTask(TaskSpec):
     instruction: str
     labels: list[str]
     options: list[ChoiceOption]
-    _token_ids_cache: dict[torch.device, torch.Tensor] = field(
-        default_factory=dict, repr=False, compare=False
+    _token_ids_list: list[int] = field(
+        default_factory=list, repr=False, compare=False
     )
 
     @classmethod
@@ -75,12 +75,12 @@ class MultipleChoiceTask(TaskSpec):
         raise KeyError(f"Unknown class label: {label}")
 
     def class_logits_from_vocab(self, vocab_logits: torch.Tensor) -> torch.Tensor:
-        device = vocab_logits.device
-        token_ids = self._token_ids_cache.get(device)
-        if token_ids is None:
-            # Built once per device and reused across every attack step / forward pass.
-            token_ids = torch.tensor(self.class_token_ids(), device=device)
-            self._token_ids_cache[device] = token_ids
+        # Cache the Python list once; build the device tensor fresh each call so it is
+        # never an inference tensor regardless of the calling context (inference_mode vs
+        # autograd). The tensor is 2-4 ints so creation cost is negligible.
+        if not self._token_ids_list:
+            self._token_ids_list = self.class_token_ids()
+        token_ids = torch.tensor(self._token_ids_list, device=vocab_logits.device)
         class_logits = vocab_logits.index_select(dim=-1, index=token_ids)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
