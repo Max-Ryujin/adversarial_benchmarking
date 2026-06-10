@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
 
@@ -130,6 +132,7 @@ def apgd_attack(
     loss_steps = []
 
     task = getattr(model, "task", None)
+    debug_enabled = logger.isEnabledFor(logging.DEBUG)
 
     # ============================================================
     # Main loop
@@ -233,27 +236,30 @@ def apgd_attack(
             adv_images = x_new.detach()
             x_prev = adv_images.clone()
 
-        predicted_indices = logits.argmax(dim=-1)
+        # The per-step diagnostics below force host<->device syncs (`.item()`, `.cpu()`)
+        # and extra reductions, so only compute them when DEBUG logging is on.
+        if debug_enabled:
+            predicted_indices = logits.argmax(dim=-1)
 
-        logger.debug(
-            "APGD step %s/%s loss=%.6f pred=%s step_size=%.6f grad=%s",
-            step + 1,
-            steps,
-            loss.item(),
-            predicted_indices.detach().cpu().tolist(),
-            step_size.mean().item(),
-            summarize_tensor(grad),
-        )
-
-        if task is not None:
             logger.debug(
-                "APGD step %s class logits: %s",
+                "APGD step %s/%s loss=%.6f pred=%s step_size=%.6f grad=%s",
                 step + 1,
-                format_named_logits(
-                    task.class_labels(),
-                    logits[0],
-                ),
+                steps,
+                loss.item(),
+                predicted_indices.detach().cpu().tolist(),
+                step_size.mean().item(),
+                summarize_tensor(grad),
             )
+
+            if task is not None:
+                logger.debug(
+                    "APGD step %s class logits: %s",
+                    step + 1,
+                    format_named_logits(
+                        task.class_labels(),
+                        logits[0],
+                    ),
+                )
 
     logger.info("Finished APGD attack")
 

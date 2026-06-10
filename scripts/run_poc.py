@@ -7,13 +7,12 @@ from pathlib import Path
 import torch
 from transformers import AutoProcessor
 
-from adversarial_benchmarking.attacks.autoattack import autoattack_attack
-from adversarial_benchmarking.attacks.autoattack2 import apgd_attack
+from adversarial_benchmarking.attacks.apgd import apgd_attack
 from adversarial_benchmarking.attacks.pgd import pgd_attack
 from adversarial_benchmarking.config import AttackConfig, RunConfig
 from adversarial_benchmarking.data.image_folder import load_image_tensor
 from adversarial_benchmarking.logging_utils import configure_logging, format_named_logits, get_logger
-from adversarial_benchmarking.models.qwen3_vl import Qwen3VLFirstTokenClassifier
+from adversarial_benchmarking.models.qwen3_vl import Qwen3VLFirstTokenClassifier, free_memory
 from adversarial_benchmarking.tasks.multiple_choice import MultipleChoiceTask
 from adversarial_benchmarking.utils import save_image_tensor, write_json
 
@@ -39,8 +38,6 @@ def run_attack(
             momentum=0.75,
             eot_iter=1,
         )
-    if attack_config.name == "autoattack":
-        return autoattack_attack(model, clean_image, labels, attack_config)
     raise ValueError(f"Unsupported attack: {attack_config.name}")
 
 
@@ -59,16 +56,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="outputs/poc", help="Directory for artifacts.")
     parser.add_argument("--model-name", default="Qwen/Qwen3-VL-4B-Instruct", help="HF model name.")
     parser.add_argument("--device", default="auto", help="Torch device. Use 'auto' to pick a supported accelerator or CPU.")
+    parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=("auto", "float32", "float16", "bfloat16"),
+        help="Model weight dtype. 'auto' uses float32 on CPU and the checkpoint dtype on GPU. "
+        "On a memory-constrained GPU (e.g. older AMD cards) pass 'float16' to roughly halve VRAM use.",
+    )
+    parser.add_argument(
+        "--grad-checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing during the attack. Greatly reduces peak memory at the cost of "
+        "~30%% more compute per step. Recommended when you hit out-of-memory errors. Output is unchanged.",
+    )
     parser.add_argument("--resize", type=int, default=448, help="Fixed square resize before processor.")
     parser.add_argument("--min-pixels", type=int)
     parser.add_argument("--max-pixels", type=int)
     parser.add_argument(
         "--attack",
-        choices=("pgd", "apgd", "autoattack"),
+        choices=("pgd", "apgd"),
         default="pgd",
-        help="Attack implementation to run. Use 'apgd' for the local adaptive PGD variant and 'autoattack' for the external AutoAttack package.",
+        help="Attack implementation to run. Use 'apgd' for the local adaptive-PGD variant (DLR loss, momentum, restarts).",
     )
-    parser.add_argument("--norm", default="Linf", help="Threat model norm for AutoAttack.")
+    parser.add_argument("--norm", default="Linf", help="Threat-model norm (Linf is the only supported norm).")
     parser.add_argument("--epsilon", type=float, default=8.0 / 255.0)
     parser.add_argument("--step-size", type=float, default=2.0 / 255.0)
     parser.add_argument("--steps", type=int, default=20)
@@ -92,6 +102,8 @@ def main() -> None:
         max_pixels=args.max_pixels,
         resize=args.resize,
         target_label=args.target_label,
+        dtype=args.dtype,
+        grad_checkpointing=args.grad_checkpointing,
         debug=args.debug,
     )
     attack_config = AttackConfig(
@@ -127,6 +139,8 @@ def main() -> None:
         min_pixels=run_config.min_pixels,
         max_pixels=run_config.max_pixels,
         resize=run_config.resize,
+        torch_dtype=args.dtype,
+        grad_checkpointing=args.grad_checkpointing,
     )
 
     clean_image = load_image_tensor(run_config.image_path).unsqueeze(0).to(model.device)
@@ -134,7 +148,9 @@ def main() -> None:
     label_index = task.class_index_for_label(label_name)
     labels = torch.tensor([label_index], device=model.device)
 
-    clean_result = model.forward_result(clean_image)
+    # Evaluation forwards are gradient-free, so use the inference-mode path to avoid
+    # building (and holding) an autograd graph we never back-propagate through.
+    clean_result = model.predict_result(clean_image)
     clean_prediction_index = clean_result.class_logits.argmax(dim=-1).item()
     clean_generation = model.generate_letters(clean_image)[0]
     logger.info("Clean prediction: %s", task.class_labels()[clean_prediction_index])
@@ -144,7 +160,8 @@ def main() -> None:
     )
 
     adv_image = run_attack(model, clean_image, labels, attack_config)
-    adv_result = model.forward_result(adv_image)
+    free_memory(model.device)
+    adv_result = model.predict_result(adv_image)
     adv_prediction_index = adv_result.class_logits.argmax(dim=-1).item()
     adv_generation = model.generate_letters(adv_image)[0]
     logger.info("Adversarial prediction: %s", task.class_labels()[adv_prediction_index])

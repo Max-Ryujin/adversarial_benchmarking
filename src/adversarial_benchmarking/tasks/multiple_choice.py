@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 
 import torch
@@ -21,6 +21,9 @@ class MultipleChoiceTask(TaskSpec):
     instruction: str
     labels: list[str]
     options: list[ChoiceOption]
+    _token_ids_cache: dict[torch.device, torch.Tensor] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @classmethod
     def from_labels(
@@ -72,7 +75,12 @@ class MultipleChoiceTask(TaskSpec):
         raise KeyError(f"Unknown class label: {label}")
 
     def class_logits_from_vocab(self, vocab_logits: torch.Tensor) -> torch.Tensor:
-        token_ids = torch.tensor(self.class_token_ids(), device=vocab_logits.device)
+        device = vocab_logits.device
+        token_ids = self._token_ids_cache.get(device)
+        if token_ids is None:
+            # Built once per device and reused across every attack step / forward pass.
+            token_ids = torch.tensor(self.class_token_ids(), device=device)
+            self._token_ids_cache[device] = token_ids
         class_logits = vocab_logits.index_select(dim=-1, index=token_ids)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(

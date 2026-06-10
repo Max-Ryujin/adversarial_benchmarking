@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +26,47 @@ class ForwardResult:
 
 
 logger = get_logger("models.qwen3_vl")
+
+
+_DTYPE_ALIASES: dict[str, torch.dtype] = {
+    "float32": torch.float32,
+    "fp32": torch.float32,
+    "float16": torch.float16,
+    "fp16": torch.float16,
+    "half": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+}
+
+
+def free_memory(device: torch.device | None = None) -> None:
+    """Release cached allocator memory. Helps both CPU RAM and (ROCm/CUDA) VRAM."""
+    gc.collect()
+    if torch.cuda.is_available():
+        # ROCm exposes the same `torch.cuda` namespace as CUDA.
+        torch.cuda.empty_cache()
+
+
+def prepare_image_batch(images: torch.Tensor, resize: int | None) -> torch.Tensor:
+    """Clamp a BCHW float batch to [0, 1] and optionally bilinearly resize it to a square.
+
+    This is the single source of truth for how raw pixels are transformed before the Qwen
+    processor sees them. Both the attack (`Qwen3VLFirstTokenClassifier`) and the chat script
+    call it so an image is preprocessed identically in both, leaving the prompt as the only
+    difference between them.
+    """
+    if images.dim() != 4:
+        raise ValueError(f"Expected BCHW image tensor, got shape {tuple(images.shape)}")
+
+    image_batch = images.clamp(0.0, 1.0)
+    if resize is not None:
+        image_batch = F.interpolate(
+            image_batch,
+            size=(resize, resize),
+            mode="bilinear",
+            align_corners=False,
+        )
+    return image_batch
 
 
 def _resolve_device(device: str) -> torch.device:
@@ -51,10 +94,30 @@ def _resolve_torch_dtype(
     torch_dtype: torch.dtype | str,
     device: torch.device,
 ) -> torch.dtype | str:
-    if device.type == "cpu" and torch_dtype == "auto":
-        logger.info("Using float32 weights on CPU to keep backward passes supported.")
-        return torch.float32
-    return torch_dtype
+    if isinstance(torch_dtype, torch.dtype):
+        return torch_dtype
+
+    key = str(torch_dtype).lower()
+    if key in _DTYPE_ALIASES:
+        resolved = _DTYPE_ALIASES[key]
+        if device.type == "cpu" and resolved in (torch.float16, torch.bfloat16):
+            # fp16/bf16 backward passes are unsupported or extremely slow on CPU; the
+            # attacks need a backward pass through the model, so keep CPU in float32.
+            logger.warning(
+                "Requested %s on CPU is not usable for gradient-based attacks; using float32 instead.",
+                key,
+            )
+            return torch.float32
+        return resolved
+
+    if key == "auto":
+        if device.type == "cpu":
+            logger.info("Using float32 weights on CPU to keep backward passes supported.")
+            return torch.float32
+        # On an accelerator, let transformers pick the checkpoint's native dtype.
+        return "auto"
+
+    raise ValueError(f"Unsupported torch dtype: {torch_dtype!r}")
 
 
 class Qwen3VLFirstTokenClassifier(torch.nn.Module):
@@ -67,6 +130,7 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         max_pixels: int | None = None,
         resize: int | None = 448,
         torch_dtype: torch.dtype | str = "auto",
+        grad_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         processor_kwargs: dict[str, Any] = {}
@@ -83,9 +147,25 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
             model_name,
             torch_dtype=resolved_dtype,
             device_map=None,
+            low_cpu_mem_usage=True,
         )
         self.model.to(resolved_device)
         self.model.eval()
+
+        # The attacks only differentiate w.r.t. the input image, never the weights.
+        # Freezing the parameters avoids allocating parameter-gradient buffers and lets
+        # autograd prune bookkeeping it would otherwise keep for trainable leaves.
+        self.model.requires_grad_(False)
+
+        self.grad_checkpointing = grad_checkpointing
+        if grad_checkpointing:
+            # Trades ~30% extra compute for a large drop in peak activation memory during
+            # the attack backward pass. Output logits are mathematically unchanged.
+            self.model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            self.model.config.use_cache = False
+            logger.info("Gradient checkpointing enabled (lower memory, slower per step).")
 
         self.device_name = str(resolved_device)
         self.task = task
@@ -93,10 +173,12 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         self.prompt_text = self._build_chat_prompt(task.build_prompt())
         logger.info("Initialized Qwen3-VL classifier for %s on %s", model_name, self.device)
         logger.debug(
-            "Model config: resize=%s min_pixels=%s max_pixels=%s classes=%s",
+            "Model config: dtype=%s resize=%s min_pixels=%s max_pixels=%s grad_checkpointing=%s classes=%s",
+            next(self.model.parameters()).dtype,
             resize,
             min_pixels,
             max_pixels,
+            grad_checkpointing,
             task.class_labels(),
         )
 
@@ -121,19 +203,9 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         )
 
     def _prepare_images(self, images: torch.Tensor) -> list[torch.Tensor]:
-        if images.dim() != 4:
-            raise ValueError(f"Expected BCHW image tensor, got shape {tuple(images.shape)}")
-
-        image_batch = images.clamp(0.0, 1.0)
-        logger.debug("Preparing image batch: %s", summarize_tensor(image_batch))
-        if self.resize is not None:
-            image_batch = F.interpolate(
-                image_batch,
-                size=(self.resize, self.resize),
-                mode="bilinear",
-                align_corners=False,
-            )
-            logger.debug("Resized image batch to %sx%s: %s", self.resize, self.resize, summarize_tensor(image_batch))
+        image_batch = prepare_image_batch(images, self.resize)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Prepared image batch: %s", summarize_tensor(image_batch))
 
         return [image_tensor for image_tensor in image_batch]
 
@@ -149,29 +221,38 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         )
         inputs.pop("token_type_ids", None)
         moved_inputs = {key: value.to(self.device) if hasattr(value, "to") else value for key, value in inputs.items()}
-        logger.debug(
-            "Processor inputs prepared: %s",
-            ", ".join(
-                f"{key}={tuple(value.shape) if hasattr(value, 'shape') else type(value).__name__}"
-                for key, value in moved_inputs.items()
-            ),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Processor inputs prepared: %s",
+                ", ".join(
+                    f"{key}={tuple(value.shape) if hasattr(value, 'shape') else type(value).__name__}"
+                    for key, value in moved_inputs.items()
+                ),
+            )
         return moved_inputs
 
     def forward_result(self, images: torch.Tensor) -> ForwardResult:
         inputs = self._processor_inputs(images)
-        outputs = self.model(**inputs, logits_to_keep=1)
+        # `logits_to_keep=1` restricts the LM head to the final prompt position, and
+        # `use_cache=False` avoids building a KV cache we never read on a single forward.
+        outputs = self.model(**inputs, logits_to_keep=1, use_cache=False)
         vocab_logits = outputs.logits[:, -1, :]
         class_logits = self.task.class_logits_from_vocab(vocab_logits)
-        logger.debug("Forward class logits: %s", format_named_logits(self.task.class_labels(), class_logits[0]))
-        logger.debug(
-            "Top vocab logits for first answer token: %s",
-            format_topk_vocab_logits(vocab_logits[:1], self.processor.tokenizer),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Forward class logits: %s", format_named_logits(self.task.class_labels(), class_logits[0]))
+            logger.debug(
+                "Top vocab logits for first answer token: %s",
+                format_topk_vocab_logits(vocab_logits[:1], self.processor.tokenizer),
+            )
         return ForwardResult(class_logits=class_logits, vocab_logits=vocab_logits, inputs=inputs)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         return self.forward_result(images).class_logits
+
+    @torch.inference_mode()
+    def predict_result(self, images: torch.Tensor) -> ForwardResult:
+        """Gradient-free forward for evaluation/logging (no autograd graph is built)."""
+        return self.forward_result(images)
 
     @torch.inference_mode()
     def generate_letters(self, images: torch.Tensor, max_new_tokens: int = 4) -> list[str]:
@@ -180,6 +261,7 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         prompt_lengths = inputs["attention_mask"].sum(dim=-1).tolist()
         trimmed = [output_ids[prompt_length:] for output_ids, prompt_length in zip(generated_ids, prompt_lengths)]
         decoded = self.processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-        logger.debug("Generated token ids: %s", [token_ids.tolist() for token_ids in trimmed])
-        logger.debug("Decoded generations: %s", decoded)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Generated token ids: %s", [token_ids.tolist() for token_ids in trimmed])
+            logger.debug("Decoded generations: %s", decoded)
         return decoded

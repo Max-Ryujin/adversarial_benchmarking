@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
 
@@ -24,10 +26,13 @@ def pgd_attack(
         config.targeted,
         config.random_start,
     )
+    debug_enabled = logger.isEnabledFor(logging.DEBUG)
+
     if config.random_start:
         delta = torch.empty_like(images).uniform_(-config.epsilon, config.epsilon)
         adv_images = torch.clamp(images + delta, 0.0, 1.0)
-        logger.debug("Initialized random start delta: %s", summarize_tensor(delta))
+        if debug_enabled:
+            logger.debug("Initialized random start delta: %s", summarize_tensor(delta))
     else:
         adv_images = images.clone()
         logger.debug("Using deterministic PGD start")
@@ -45,22 +50,25 @@ def pgd_attack(
         adv_images = adv_images.detach() + config.step_size * grad.sign()
         delta = torch.clamp(adv_images - images, min=-config.epsilon, max=config.epsilon) # ensure epsilon ball
         adv_images = torch.clamp(images + delta, 0.0, 1.0)
-        predicted_indices = logits.argmax(dim=-1)
-        logger.debug(
-            "PGD step %s/%s loss=%.6f predicted_indices=%s grad=%s delta=%s",
-            step_index + 1,
-            config.steps,
-            loss.item(),
-            predicted_indices.detach().cpu().tolist(),
-            summarize_tensor(grad),
-            summarize_tensor(delta),
-        )
-        if task is not None:
+        # The per-step diagnostics below force host<->device syncs (`.item()`, `.cpu()`)
+        # and extra reductions, so only compute them when DEBUG logging is on.
+        if debug_enabled:
+            predicted_indices = logits.argmax(dim=-1)
             logger.debug(
-                "PGD step %s class logits: %s",
+                "PGD step %s/%s loss=%.6f predicted_indices=%s grad=%s delta=%s",
                 step_index + 1,
-                format_named_logits(task.class_labels(), logits[0]),
+                config.steps,
+                loss.item(),
+                predicted_indices.detach().cpu().tolist(),
+                summarize_tensor(grad),
+                summarize_tensor(delta),
             )
+            if task is not None:
+                logger.debug(
+                    "PGD step %s class logits: %s",
+                    step_index + 1,
+                    format_named_logits(task.class_labels(), logits[0]),
+                )
 
     logger.info("Finished PGD attack")
     return adv_images.detach()

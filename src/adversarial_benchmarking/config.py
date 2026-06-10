@@ -29,3 +29,5 @@ class RunConfig:
     max_pixels: int | None = None
     resize: int | None = 448
     target_label: str | None = None
+    dtype: str = "auto"
+    grad_checkpointing: bool = False

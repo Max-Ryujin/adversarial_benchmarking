@@ -20,9 +20,6 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
 ]
-autoattack = [
-    "autoattack @ git+https://github.com/fra31/auto-attack",
-]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

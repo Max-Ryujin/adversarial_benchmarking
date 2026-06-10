@@ -12,9 +12,18 @@ from adversarial_benchmarking.logging_utils import get_logger, summarize_tensor
 logger = get_logger("data.image_folder")
 
 
+def image_to_tensor(image: Image.Image) -> torch.Tensor:
+    """Convert an RGB PIL image to a CHW float tensor in [0, 1].
+
+    This is the single conversion used everywhere raw pixels enter the pipeline, so the
+    attack and the chat script start from byte-identical tensors for the same image.
+    """
+    return torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
+
+
 def load_image_tensor(image_path: str | Path) -> torch.Tensor:
     image = Image.open(image_path).convert("RGB")
-    tensor = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
+    tensor = image_to_tensor(image)
     logger.info("Loaded image from %s", image_path)
     logger.debug("Image size=%s tensor=%s", image.size, summarize_tensor(tensor))
     return tensor
