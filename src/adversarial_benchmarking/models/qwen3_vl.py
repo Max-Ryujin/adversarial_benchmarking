@@ -131,6 +131,7 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         resize: int | None = 448,
         torch_dtype: torch.dtype | str = "auto",
         grad_checkpointing: bool = False,
+        assistant_prefix: str = "",
     ) -> None:
         super().__init__()
         processor_kwargs: dict[str, Any] = {}
@@ -170,7 +171,8 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         self.device_name = str(resolved_device)
         self.task = task
         self.resize = resize
-        self.prompt_text = self._build_chat_prompt(task.build_prompt())
+        self.assistant_prefix = assistant_prefix
+        self.prompt_text = self._build_chat_prompt(task.build_prompt(), assistant_prefix)
         logger.info("Initialized Qwen3-VL classifier for %s on %s", model_name, self.device)
         logger.debug(
             "Model config: dtype=%s resize=%s min_pixels=%s max_pixels=%s grad_checkpointing=%s classes=%s",
@@ -186,7 +188,7 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
     def device(self) -> torch.device:
         return next(self.model.parameters()).device
 
-    def _build_chat_prompt(self, user_prompt: str) -> str:
+    def _build_chat_prompt(self, user_prompt: str, assistant_prefix: str = "") -> str:
         messages = [
             {
                 "role": "user",
@@ -196,11 +198,22 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
                 ],
             }
         ]
-        return self.processor.apply_chat_template(
+        prompt = self.processor.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
         )
+        # A prefill: text appended after the "<|im_start|>assistant\n" header becomes the forced
+        # beginning of the reply. Generation (and the first-token attack) then continues from the
+        # token right after it, so the objective is the first *free* token past the prefix.
+        if assistant_prefix:
+            prompt = prompt + assistant_prefix
+        return prompt
+
+    def set_assistant_prefix(self, assistant_prefix: str) -> None:
+        """Rebuild the prompt with a new forced assistant prefix (cheap; no model reload)."""
+        self.assistant_prefix = assistant_prefix
+        self.prompt_text = self._build_chat_prompt(self.task.build_prompt(), assistant_prefix)
 
     def _prepare_images(self, images: torch.Tensor) -> list[torch.Tensor]:
         image_batch = prepare_image_batch(images, self.resize)
@@ -264,4 +277,24 @@ class Qwen3VLFirstTokenClassifier(torch.nn.Module):
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Generated token ids: %s", [token_ids.tolist() for token_ids in trimmed])
             logger.debug("Decoded generations: %s", decoded)
+        return decoded
+
+    @torch.inference_mode()
+    def generate_text(self, images: torch.Tensor, max_new_tokens: int = 256) -> list[str]:
+        """Greedily generate a full continuation for each image.
+
+        The forced ``assistant_prefix`` (if any) is part of the prompt, so the returned text is
+        only what the model produced *after* the prefix. Prepend ``self.assistant_prefix`` when
+        showing the reply the way the model "sees" it.
+        """
+        inputs = self._processor_inputs(images)
+        generated_ids = self.model.generate(
+            **inputs, max_new_tokens=max_new_tokens, do_sample=False
+        )
+        prompt_lengths = inputs["attention_mask"].sum(dim=-1).tolist()
+        trimmed = [output_ids[prompt_length:] for output_ids, prompt_length in zip(generated_ids, prompt_lengths)]
+        decoded = self.processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Generated continuation token ids: %s", [token_ids.tolist() for token_ids in trimmed])
+            logger.debug("Decoded continuations: %s", decoded)
         return decoded
